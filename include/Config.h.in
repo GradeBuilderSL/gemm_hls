@@ -5,14 +5,20 @@
 
 #include <cstddef>
 #include <cstdint>
-#ifdef MM_HALF_PRECISION
-#include "hls_half.h"
-#endif
+${MM_DATA_TYPE_INCLUDE}
 #include "hlslib/xilinx/Operators.h"
 
 using uint8_t = unsigned char;
 
-using Data_t = ${MM_DATA_TYPE}; 
+using Data_t = ${MM_DATA_TYPE};
+// Wide accumulator: same fraction bits as Data_t but more integer bits.
+// For ap_fixed<W,I>: AccData_t = ap_fixed<W+extra,I+extra> to prevent
+// overflow when accumulating K products.  For float/double: same as Data_t.
+using AccData_t = ${MM_ACC_DATA_TYPE};
+// Saturating output type: identical representation to Data_t but uses AP_SAT
+// quantisation mode so that out-of-range AccData_t values are clamped rather
+// than wrapping when written to the output stream.
+using SatData_t = ${MM_SAT_DATA_TYPE};
 constexpr int kMemoryWidthBytesN = ${MM_MEMORY_BUS_WIDTH_N};
 constexpr int kMemoryWidthBytesK = ${MM_MEMORY_BUS_WIDTH_K};
 constexpr int kMemoryWidthBytesM = ${MM_MEMORY_BUS_WIDTH_M};
@@ -43,6 +49,6 @@ using OperatorReduce = hlslib::op::${MM_REDUCE_OP}<Data_t>;
 // data width must be converted if the memory bus is wider than the number of
 // rows buffered per PE.
 #if (defined(MM_TRANSPOSED_A) && \
-     (${MM_DATA_WIDTH_${MM_DATA_TYPE}} != ${MM_MEMORY_BUS_WIDTH_N}))
+     (${MM_DATA_WIDTH_BYTES} != ${MM_MEMORY_BUS_WIDTH_N}))
 #define MM_CONVERT_A
 #endif

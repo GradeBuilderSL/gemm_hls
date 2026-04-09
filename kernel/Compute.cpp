@@ -22,8 +22,11 @@ void ProcessingElement(Stream<ComputePackN_t> &aIn,
   // many processing elements (kInnerTileSizeN).
   ComputePackN_t aBuffer[2 * kInnerTilesN];
 
-  // This is where we spend all our T^2 fast memory
-  ComputePackM_t cBuffer[kInnerTilesN * kInnerTilesM][kComputeTileSizeN];
+  // This is where we spend all our T^2 fast memory.
+  // AccComputePackM_t has wider integer bits than ComputePackM_t so that
+  // accumulation of K products does not overflow.  For float/double/integer
+  // types AccComputePackM_t == ComputePackM_t, so there is no extra cost.
+  AccComputePackM_t cBuffer[kInnerTilesN * kInnerTilesM][kComputeTileSizeN];
   #pragma HLS ARRAY_PARTITION variable=cBuffer complete dim=2
 
   // Populate the buffer for the first outer product 
@@ -112,10 +115,10 @@ OuterTile_N:
               const bool inBoundsN = ((n0 * kInnerTilesN * kComputeTileSizeN +
                                        n1 * kComputeTileSizeN + n2) < size_n);
 
-              ComputePackM_t cStore;
+              AccComputePackM_t cStore;
               const auto cPrev = (k > 0)
                                      ? cBuffer[n1 * kInnerTilesM + m1][n2]
-                                     : ComputePackM_t(static_cast<Data_t>(0));
+                                     : AccComputePackM_t(AccData_t(0));
 
             Unroll_M:
               for (unsigned m2 = 0; m2 < kComputeTileSizeM; ++m2) {
@@ -126,15 +129,19 @@ OuterTile_N:
 
                 const bool inBounds = inBoundsN && inBoundsM;
 
-                const auto mapped = OperatorMap::Apply(aVal[n2], bVal[m2]);
+                // Widen to AccData_t before multiplying so the product is not
+                // truncated to Data_t precision at each step.
+                const AccData_t aElem = AccData_t(aVal[n2]);
+                const AccData_t bElem = AccData_t(bVal[m2]);
+                const AccData_t mapped = aElem * bElem;
                 MM_MULT_RESOURCE_PRAGMA(mapped);
-                const auto prev = cPrev[m2];
+                const AccData_t prev = cPrev[m2];
 
-                const auto reduced = OperatorReduce::Apply(prev, mapped);
+                const AccData_t reduced = prev + mapped;
                 MM_ADD_RESOURCE_PRAGMA(reduced);
                 // If out of bounds, propagate the existing value instead of
                 // storing the newly computed value
-                cStore[m2] = inBounds ? reduced : prev; 
+                cStore[m2] = inBounds ? reduced : prev;
                 #pragma HLS DEPENDENCE variable=cBuffer false
               }
 
@@ -168,7 +175,17 @@ OuterTile_N:
       for (unsigned i = 0; i < writeFlattened; ++i) {
         #pragma HLS PIPELINE II=1
         if (inner < kComputeTileSizeN * kInnerTilesM) {
-          cOut.Push(cBuffer[n1 * kInnerTilesM + m1][n2]);
+          // Saturating cast from AccData_t back to Data_t.  SatData_t has
+          // identical width/format to Data_t but uses AP_SAT quantisation
+          // mode, so values outside Data_t range are clamped rather than
+          // wrapping.  For float/double AccData_t == Data_t, this is a no-op.
+          ComputePackM_t cOutPack;
+          const auto &accPack = cBuffer[n1 * kInnerTilesM + m1][n2];
+          for (int _i = 0; _i < kComputeTileSizeM; ++_i) {
+            #pragma HLS UNROLL
+            cOutPack[_i] = SatData_t(accPack[_i]);
+          }
+          cOut.Push(cOutPack);
           if (m1 == kInnerTilesM - 1) {
             m1 = 0;
             if (n2 == kComputeTileSizeN - 1) {

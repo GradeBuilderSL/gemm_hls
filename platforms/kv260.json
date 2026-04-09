@@ -1,0 +1,15 @@
+{
+  "description": "Xilinx KV260 Starter Kit (xck26, 288 BRAM_18K / 1248 DSP / 117K LUT / 234K FF)",
+  "part": "xck26-sfvc784-2LV-c",
+  "board": "xilinx.com:kv260_som:part0:1.4",
+  "clock": 300,
+  "data_type": "ap_fixed<16,8>",
+  "acc_data_type": "ap_fixed<32,24>",
+  "parallelism_n": 4,
+  "parallelism_m": 8,
+  "memory_tile_size_n": 128,
+  "memory_tile_size_m": 256,
+  "memory_bus_width_n": 64,
+  "memory_bus_width_k": 64,
+  "memory_bus_width_m": 64
+}

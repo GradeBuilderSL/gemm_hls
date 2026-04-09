@@ -18,11 +18,11 @@
 void PrintUsage() {
 #ifndef MM_DYNAMIC_SIZES
   std::cerr
-      << "Usage: ./RunHardware.exe <mode [hw/hw_emu]> [<verify [on/off]>]\n"
+      << "Usage: ./RunHardware.exe <mode [hw/hw_emu]> [<verify [on/off]>] [transposed]\n"
       << std::flush;
 #else
   std::cerr << "Usage: ./RunHardware.exe N K M [<mode [hw/hw_emu]>] [<verify "
-               "[on/off]>]\n"
+               "[on/off]>] [transposed]\n"
             << std::flush;
 #endif
 }
@@ -89,12 +89,26 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
+  bool transposed_a = false;
+  if (next_arg < argc) {
+    const std::string transposed_arg(argv[next_arg++]);
+    if (transposed_arg == "transposed") {
+      transposed_a = true;
+    } else {
+      PrintUsage();
+      return 1;
+    }
+  }
 
   std::vector<Data_t> a, b, cRef;
   std::vector<MemoryPackK_t, hlslib::ocl::AlignedAllocator<MemoryPackK_t, 4096>>
       aMem;
   std::vector<MemoryPackM_t, hlslib::ocl::AlignedAllocator<MemoryPackM_t, 4096>>
       bMem, cMem;
+  // When transposed_a is true the kernel expects A in K×N_padded layout.
+  const unsigned size_n_padded =
+      OuterTilesN(size_n) * kOuterTileSizeN;
+
   std::cout << "Initializing host memory..." << std::flush;
   if (verify) {
     a = decltype(a)(size_n * size_k);
@@ -105,7 +119,16 @@ int main(int argc, char **argv) {
                   [&dist, &rng](Data_t &in) { in = Data_t(dist(rng)); });
     cRef = decltype(cRef)(size_n * size_m, 0);
 
-    aMem = Pack<kMemoryWidthK>(a);
+    if (!transposed_a) {
+      aMem = Pack<kMemoryWidthK>(a);
+    } else {
+      // Transpose A into K×N_padded layout (zero-pad extra N columns)
+      std::vector<Data_t> aT(size_k * size_n_padded, Data_t(0));
+      for (unsigned n = 0; n < size_n; ++n)
+        for (unsigned k = 0; k < size_k; ++k)
+          aT[k * size_n_padded + n] = a[n * size_k + k];
+      aMem = Pack<kMemoryWidthK>(aT);
+    }
     bMem = Pack<kMemoryWidthM>(b);
     cMem = Pack<kMemoryWidthM>(cRef);
   }
@@ -119,9 +142,13 @@ int main(int argc, char **argv) {
     auto program = context.MakeProgram(path);
 
     std::cout << "Initializing device memory...\n" << std::flush;
+    // Transposed A is K×N_padded; normal A is N×K.
+    const unsigned aElemsDevice = transposed_a
+        ? size_k * size_n_padded / kMemoryWidthK
+        : size_n * size_k / kMemoryWidthK;
 #ifdef MM_TWO_DIMMS
     auto aDevice = context.MakeBuffer<MemoryPackK_t, hlslib::ocl::Access::read>(
-        hlslib::ocl::StorageType::DDR, 0, size_n * size_k / kMemoryWidthK);
+        hlslib::ocl::StorageType::DDR, 0, aElemsDevice);
     auto bDevice = context.MakeBuffer<MemoryPackM_t, hlslib::ocl::Access::read>(
         hlslib::ocl::StorageType::DDR, 1, size_k * size_m / kMemoryWidthM);
     auto cDevice =
@@ -129,7 +156,7 @@ int main(int argc, char **argv) {
             hlslib::ocl::StorageType::DDR, 1, size_n * size_m / kMemoryWidthM);
 #else
     auto aDevice = context.MakeBuffer<MemoryPackK_t, hlslib::ocl::Access::read>(
-        hlslib::ocl::StorageType::DDR, 1, size_n * size_k / kMemoryWidthK);
+        hlslib::ocl::StorageType::DDR, 1, aElemsDevice);
     auto bDevice = context.MakeBuffer<MemoryPackM_t, hlslib::ocl::Access::read>(
         hlslib::ocl::StorageType::DDR, 1, size_k * size_m / kMemoryWidthM);
     auto cDevice =
@@ -147,10 +174,11 @@ int main(int argc, char **argv) {
     std::cout << "Creating kernel...\n" << std::flush;
 #ifndef MM_DYNAMIC_SIZES
     auto kernel = program.MakeKernel("MatrixMultiplicationKernel", aDevice,
-                                     bDevice, cDevice);
+                                     bDevice, cDevice, transposed_a);
 #else
     auto kernel = program.MakeKernel("MatrixMultiplicationKernel", aDevice,
-                                     bDevice, cDevice, size_n, size_k, size_m);
+                                     bDevice, cDevice, size_n, size_k, size_m,
+                                     transposed_a);
 #endif
 
 #ifdef MM_POWER_METER

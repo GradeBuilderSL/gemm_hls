@@ -30,40 +30,40 @@ using MemoryPackM_t = hlslib::DataPack<Data_t, kMemoryWidthM>;
 using ComputePackN_t = hlslib::DataPack<Data_t, kComputeTileSizeN>;
 using ComputePackM_t = hlslib::DataPack<Data_t, kComputeTileSizeM>;
 using OutputPack_t = hlslib::DataPack<Data_t, kComputeTileSizeM>;
+// Accumulator bus: wider integer part to prevent overflow during K-reduction.
+// When AccData_t == Data_t (float/double/int), this is identical to ComputePackM_t.
+using AccComputePackM_t = hlslib::DataPack<AccData_t, kComputeTileSizeM>;
 
-#ifndef MM_TRANSPOSED_A
-
-// On-chip transpose of A
+// On-chip transpose of A (used when A is row-major in DDR)
 constexpr int kTransposeWidth = kTransposeWidthBytes / sizeof(Data_t);
 static_assert(kTransposeWidthBytes % sizeof(Data_t) == 0,
-              "Transpose width must be divisable by data size.");
+              "Transpose width must be divisible by data size.");
 static_assert(kTransposeWidthBytes % kMemoryWidthBytesK == 0,
-              "Transpose width must be divisable by memory port width.");
+              "Transpose width must be divisible by memory port width.");
 
+// N-dimension memory bus (used when A is pre-transposed in DDR).
+// Runtime transposed-A mode requires equal K and N bus widths so a single
+// AXI port can serve both modes without changing the port type.
+constexpr int kMemoryWidthN = kMemoryWidthBytesN / sizeof(Data_t);
+static_assert(kMemoryWidthBytesN % sizeof(Data_t) == 0,
+              "Memory width in N not divisible by size of data type.");
+static_assert(kMemoryWidthBytesN == kMemoryWidthBytesK,
+              "Runtime transposed-A requires equal K and N memory bus widths "
+              "(MM_MEMORY_BUS_WIDTH_N == MM_MEMORY_BUS_WIDTH_K).");
+using MemoryPackN_t = hlslib::DataPack<Data_t, kMemoryWidthN>;
+
+// A always uses the K-width bus (identical to the N-width bus per the assert).
 using MemoryPackA_t = MemoryPackK_t;
 constexpr decltype(kMemoryWidthK) kMemoryWidthA = kMemoryWidthK;
 
-#else // MM_TRANSPOSED_A
-
-// Memory bus in N-dimension (for transposed A)
-constexpr int kMemoryWidthN = kMemoryWidthBytesN / sizeof(Data_t);
-static_assert(kMemoryWidthBytesN % sizeof(Data_t) == 0,
-              "Memory width in N not divisable by size of data type.");
-using MemoryPackN_t = hlslib::DataPack<Data_t, kMemoryWidthN>;
-using MemoryPackA_t = MemoryPackN_t;
-constexpr decltype(kMemoryWidthN) kMemoryWidthA = kMemoryWidthN;
-
 constexpr unsigned long kOuterTileSizeNMemory = kOuterTileSizeN / kMemoryWidthN;
-static_assert(
-    kOuterTileSizeN % kMemoryWidthN == 0,
-    "Outer memory tile size in N must be divisable by memory port width.");
+static_assert(kOuterTileSizeN % kMemoryWidthN == 0,
+              "Outer memory tile size in N must be divisible by memory port width.");
 
 inline unsigned SizeNMemory(unsigned n) {
   #pragma HLS INLINE
   return n / kMemoryWidthN;
 }
-
-#endif // MM_TRANSPOSED_A
 
 constexpr unsigned long kOuterTileSizeMMemory = kOuterTileSizeM / kMemoryWidthM;
 static_assert(
@@ -86,13 +86,8 @@ static_assert(kInnerTileSizeN % kComputeTileSizeN == 0,
 
 static_assert(kSizeK % kMemoryWidthK == 0,
               "K must be divisable by memory width.");
-
-#ifndef MM_TRANSPOSED_A
-
 static_assert(kSizeK % kTransposeWidth == 0,
               "K must be divisable by the transpose width.");
-
-#endif
 
 #endif
 
@@ -154,18 +149,15 @@ constexpr T PowerOfTwo(T number, unsigned char power) {
 
 extern "C" {
 
-#ifdef MM_TRANSPOSED_A
-void MatrixMultiplicationKernel(MemoryPackN_t const a[],
-                                MemoryPackM_t const b[], MemoryPackM_t c[]
-#else
 void MatrixMultiplicationKernel(MemoryPackK_t const a[],
                                 MemoryPackM_t const b[], MemoryPackM_t c[]
-#endif
 #ifdef MM_DYNAMIC_SIZES
                                 ,
                                 const unsigned size_n, const unsigned size_k,
                                 const unsigned size_m
 #endif
+                                ,
+                                const bool transposed_a = false
 );
 
 }
