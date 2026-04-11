@@ -10,9 +10,7 @@
 #include <sstream>
 #include <vector>
 #include "MatrixMultiplication.h"
-#ifndef MM_CSIM
 #include "hlslib/xilinx/OpenCL.h"
-#endif
 #ifdef MM_HAS_BLAS
 #include "cblas.h"
 #endif
@@ -25,13 +23,16 @@ void Naive(IteratorRead aBegin, IteratorRead bBegin, IteratorWrite cBegin,
   using TOut = typename std::iterator_traits<IteratorWrite>::value_type;
   static_assert(std::is_same<TIn, TOut>::value,
                 "Input and output types must be identical.");
-  // NxK * KxM = NxM
+  // NxM * MxP = NxP
   for (int n = 0; n < sizeN; ++n) {
     for (int m = 0; m < sizeM; ++m) {
       TOut acc = OperatorReduce::identity();
       for (int k = 0; k < sizeK; ++k) {
-        // A is always passed in row-major N×K layout by the reference caller.
+#ifndef MM_TRANSPOSED_A
         const auto elemA = aBegin[n * sizeK + k];
+#else
+        const auto elemA = aBegin[k * sizeN + n];
+#endif
         const auto elemB = bBegin[k * sizeM + m];
         acc = OperatorReduce::Apply(acc, OperatorMap::Apply(elemA, elemB));
       }
@@ -42,13 +43,9 @@ void Naive(IteratorRead aBegin, IteratorRead bBegin, IteratorWrite cBegin,
 
 template <int width, class Container>
 inline auto Pack(Container const &in) {
-#ifdef MM_CSIM
-  std::vector<hlslib::DataPack<Data_t, width>>
-#else
   std::vector<
       hlslib::DataPack<Data_t, width>,
       hlslib::ocl::AlignedAllocator<hlslib::DataPack<Data_t, width>, 4096>>
-#endif
       result(in.size() / width);
   for (int i = 0, iMax = in.size() / width; i < iMax; ++i) {
     result[i].Pack(&in[i * width]);
@@ -65,16 +62,14 @@ inline auto Unpack(Container const &in) {
   return result;
 }
 
-// Fallback for types/operators with no BLAS specialisation.
+// Fallback
 template <typename T, class OperatorMap, class OperatorReduce>
 void CallBLAS(T const *a, T const *b, T *c, const unsigned size_n,
               const unsigned size_k, const unsigned size_m) {
-#ifndef MM_HAS_BLAS
   std::cout
       << "WARNING: BLAS not available, so I'm falling back on a naive "
          "implementation. This will take a long time for large matrix sizes.\n"
       << std::flush;
-#endif
   Naive<OperatorMap, OperatorReduce>(a, b, c, size_n, size_k, size_m);
 }
 
@@ -84,50 +79,35 @@ void CallBLAS<float, hlslib::op::Multiply<float>, hlslib::op::Add<float>>(
     float const *a, float const *b, float *c, const unsigned size_n,
     const unsigned size_k, const unsigned size_m) {
   std::cout << "Running BLAS...\n" << std::flush;
+#ifndef MM_TRANSPOSED_A
   cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, size_n, size_m, size_k,
               1.0, a, size_k, b, size_m, 0.0, c, size_m);
+#else
+  cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, size_n, size_m, size_k,
+              1.0, a, size_k, b, size_m, 0.0, c, size_m);
+#endif
 }
 template <>
 void CallBLAS<double, hlslib::op::Multiply<double>, hlslib::op::Add<double>>(
     double const *a, double const *b, double *c, const unsigned size_n,
     const unsigned size_k, const unsigned size_m) {
   std::cout << "Running BLAS...\n" << std::flush;
+#ifndef MM_TRANSPOSED_A
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, size_n, size_m, size_k,
               1.0, a, size_k, b, size_m, 0.0, c, size_m);
+#else
+  cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans, size_n, size_m, size_k,
+              1.0, a, size_k, b, size_m, 0.0, c, size_m);
+#endif
 }
 #endif
-
-inline void ReferenceViaFloat(Data_t const *a, Data_t const *b, Data_t *c,
-                               const unsigned size_n, const unsigned size_k,
-                               const unsigned size_m) {
-  std::vector<float> af(size_n * size_k);
-  std::vector<float> bf(size_k * size_m);
-  std::vector<float> cf(size_n * size_m, 0.0f);
-  for (unsigned i = 0; i < size_n * size_k; ++i)
-    af[i] = static_cast<float>(a[i]);
-  for (unsigned i = 0; i < size_k * size_m; ++i)
-    bf[i] = static_cast<float>(b[i]);
-  CallBLAS<float, hlslib::op::Multiply<float>, hlslib::op::Add<float>>(
-      af.data(), bf.data(), cf.data(), size_n, size_k, size_m);
-  for (unsigned i = 0; i < size_n * size_m; ++i)
-    c[i] = SatData_t(cf[i]);
-}
 
 inline void ReferenceImplementation(Data_t const *a, Data_t const *b, Data_t *c,
                                     const unsigned size_n,
                                     const unsigned size_k,
                                     const unsigned size_m) {
-  constexpr bool kUseFloatRef =
-      !std::is_same<Data_t, float>::value &&
-      !std::is_same<Data_t, double>::value &&
-      !std::is_integral<Data_t>::value &&
-      !std::is_same<Data_t, half>::value;
-  if (kUseFloatRef) {
-    ReferenceViaFloat(a, b, c, size_n, size_k, size_m);
-  } else {
-    CallBLAS<Data_t, OperatorMap, OperatorReduce>(a, b, c, size_n, size_k,
-                                                  size_m);
-  }
+  CallBLAS<Data_t, OperatorMap, OperatorReduce>(a, b, c, size_n, size_k,
+                                                size_m);
 }
 
 template <typename T>

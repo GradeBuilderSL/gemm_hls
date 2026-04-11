@@ -95,10 +95,9 @@ static TestResult RunTest(const unsigned size_n, const unsigned size_k,
 
 #ifdef MM_DYNAMIC_SIZES
   MatrixMultiplicationKernel(aKernel.data(), bKernel.data(), cKernel.data(),
-                             size_n, size_k, size_m, transposed_a);
+                             size_n, size_k, size_m);
 #else
-  MatrixMultiplicationKernel(aKernel.data(), bKernel.data(), cKernel.data(),
-                             transposed_a);
+  MatrixMultiplicationKernel(aKernel.data(), bKernel.data(), cKernel.data());
 #endif
 
   const auto cTest = Unpack<kMemoryWidthM>(cKernel);

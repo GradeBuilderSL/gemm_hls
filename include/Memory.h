@@ -6,24 +6,42 @@
 #include "MatrixMultiplication.h"
 #include "hlslib/xilinx/Stream.h"
 
-// Non-transposed A path: read row-major A and transpose on-chip.
+#ifndef MM_TRANSPOSED_A
+
+// Read wide bursts from memory, then distribute it into separate column
+// buffers, which will be read out in column-major order and sent to the kernel
 void ReadA(MemoryPackK_t const a[], Stream<Data_t> aSplit[kTransposeWidth],
            unsigned n, unsigned k, unsigned m);
+
+// We pop from the column buffers in column-major order, funneling the
+// transposed data to the kernel
+#ifdef MM_CONVERT_A
+
+void TransposeA(Stream<Data_t> aSplit[kTransposeWidth],
+                Stream<Data_t> &toKernel, unsigned n, unsigned k, unsigned m);
+
+void ConvertWidthA(Stream<Data_t> &narrow, Stream<ComputePackN_t> &wide,
+                   unsigned, unsigned k, unsigned m);
+
+#else
 
 void TransposeA(Stream<Data_t> aSplit[kTransposeWidth],
                 Stream<ComputePackN_t> &toKernel, unsigned n, unsigned k,
                 unsigned m);
+#endif
 
-// Pre-transposed A path: A is stored as K×N (column-major original).
-// The buffer uses MemoryPackK_t (same width as MemoryPackN_t, per static_assert).
-void ReadATransposed(MemoryPackK_t const memory[], Stream<MemoryPackK_t> &pipe,
+#else  // MM_TRANSPOSED_A
+
+void ReadATransposed(MemoryPackN_t const memory[], Stream<MemoryPackN_t> &pipe,
                      const unsigned size_n, const unsigned size_k,
                      const unsigned size_m);
 
-void ConvertWidthATransposed(Stream<MemoryPackK_t> &pipe_in,
+void ConvertWidthATransposed(Stream<MemoryPackN_t> &pipe_in,
                              Stream<ComputePackN_t> &pipe_out,
                              const unsigned size_n, const unsigned size_k,
                              const unsigned size_m);
+
+#endif
 
 void ReadB(MemoryPackM_t const memory[], Stream<MemoryPackM_t> &pipe,
            unsigned n, unsigned k, unsigned m);
