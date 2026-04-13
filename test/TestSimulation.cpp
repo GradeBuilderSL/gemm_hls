@@ -3,9 +3,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cxxabi.h>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <random>
 #include <type_traits>
 #include <vector>
@@ -158,11 +161,128 @@ static TestResult RunTest(const unsigned size_n, const unsigned size_k,
   return {mismatches == 0, diff_min, diff_max, diff_avg, mismatches, total};
 }
 
+/// Runs one GEMM test with a chessboard input pattern.
+/// A[i][k] = +1 if (i+k)%2==0, else -1.
+/// B[k][j] = +1 if (k+j)%2==0, else -1.
+/// For signed types the result is exact: C[i][j] = size_k * (-1)^(i+j),
+/// giving alternating +size_k / -size_k on a chessboard of the same period.
+static TestResult RunChessboardTest(const unsigned size_n, const unsigned size_k,
+                                    const unsigned size_m,
+                                    const bool transposed_a = false) {
+  if (size_k % kMemoryWidthK != 0) {
+    std::cerr << "  K=" << size_k << " not divisible by kMemoryWidthK="
+              << kMemoryWidthK << "\n";
+    return {false, 0, 0, 0, 0, 0};
+  }
+  if (!transposed_a && size_k % kTransposeWidth != 0) {
+    std::cerr << "  K=" << size_k << " not divisible by kTransposeWidth="
+              << kTransposeWidth << " (required for non-transposed path)\n";
+    return {false, 0, 0, 0, 0, 0};
+  }
+  if (size_m % kMemoryWidthM != 0) {
+    std::cerr << "  M=" << size_m << " not divisible by kMemoryWidthM="
+              << kMemoryWidthM << "\n";
+    return {false, 0, 0, 0, 0, 0};
+  }
+
+  const unsigned size_n_padded = OuterTilesN(size_n) * kOuterTileSizeN;
+  const unsigned size_m_padded = OuterTilesM(size_m) * kOuterTileSizeM;
+
+  std::vector<Data_t> a(size_n_padded * size_k, 0);
+  std::vector<Data_t> b(size_k * size_m_padded, 0);
+  std::vector<Data_t> cReference(size_n * size_m, 0);
+
+  // Chessboard fill — same flat-index convention used by RunTest so that
+  // Pack<> and ReferenceImplementation see identical layouts.
+  for (unsigned i = 0; i < size_n; ++i)
+    for (unsigned k = 0; k < size_k; ++k)
+      a[i * size_k + k] = Data_t((i + k) % 2 == 0 ? 1 : -1);
+  for (unsigned k = 0; k < size_k; ++k)
+    for (unsigned j = 0; j < size_m; ++j)
+      b[k * size_m + j] = Data_t((k + j) % 2 == 0 ? 1 : -1);
+
+  std::vector<Data_t> a_kernel_buf;
+  if (transposed_a) {
+    a_kernel_buf.assign(size_k * size_n_padded, Data_t(0));
+    for (unsigned n = 0; n < size_n; ++n)
+      for (unsigned k = 0; k < size_k; ++k)
+        a_kernel_buf[k * size_n_padded + n] = a[n * size_k + k];
+  }
+  const auto &a_kernel_src = transposed_a ? a_kernel_buf : a;
+  const auto aKernel = Pack<kMemoryWidthA>(a_kernel_src);
+  const auto bKernel = Pack<kMemoryWidthM>(b);
+  auto cKernel = Pack<kMemoryWidthM>(cReference);
+
+  ReferenceImplementation(a.data(), b.data(), cReference.data(),
+                          size_n, size_k, size_m);
+
+#ifdef MM_DYNAMIC_SIZES
+  MatrixMultiplicationKernel(aKernel.data(), bKernel.data(), cKernel.data(),
+                             size_n, size_k, size_m, transposed_a);
+#else
+  MatrixMultiplicationKernel(aKernel.data(), bKernel.data(), cKernel.data(),
+                             transposed_a);
+#endif
+
+  const auto cTest = Unpack<kMemoryWidthM>(cKernel);
+
+  double diff_min = std::numeric_limits<double>::max();
+  double diff_max = 0.0;
+  double diff_sum = 0.0;
+  unsigned mismatches = 0;
+  const unsigned total = size_n * size_m;
+
+  for (unsigned i = 0; i < size_n; ++i) {
+    for (unsigned j = 0; j < size_m; ++j) {
+      const double testDouble =
+          static_cast<double>(make_signed(cTest[i * size_m + j]));
+      const double refDouble =
+          static_cast<double>(make_signed(cReference[i * size_m + j]));
+      const double diff = std::abs(testDouble - refDouble);
+
+      if (diff < diff_min) diff_min = diff;
+      if (diff > diff_max) diff_max = diff;
+      diff_sum += diff;
+
+      bool mismatch;
+      if (std::is_floating_point<Data_t>::value) {
+        const double absRef = std::abs(refDouble);
+        mismatch = (absRef > 1e-9) ? diff / absRef > 1e-3 : diff > 1e-3;
+      } else if (!std::is_integral<Data_t>::value &&
+                 !std::is_same<Data_t, half>::value) {
+        const double abs_tol = (size_k + 1) / 256.0;
+        mismatch = diff > abs_tol;
+      } else {
+        mismatch = diff != 0.0;
+      }
+      if (mismatch) {
+        ++mismatches;
+        if (mismatches <= 3) {
+          std::cerr << "  Mismatch at (" << i << ", " << j << "): "
+                    << testDouble << " vs. " << refDouble << "\n";
+        }
+      }
+    }
+  }
+
+  if (total == 0) diff_min = 0.0;
+  const double diff_avg = total > 0 ? diff_sum / total : 0.0;
+  return {mismatches == 0, diff_min, diff_max, diff_avg, mismatches, total};
+}
+
+static std::string demangle(const char *mangled) {
+  int status = 0;
+  std::unique_ptr<char, void(*)(void*)> demangled(
+      abi::__cxa_demangle(mangled, nullptr, nullptr, &status),
+      std::free);
+  return (status == 0 && demangled) ? demangled.get() : mangled;
+}
+
 void printTypesInfo() {
-  std::cout << "Input data type: " << typeid(Data_t).name() << std::endl;
-  std::cout << "Output data type: " << typeid(SatData_t).name() << std::endl;
-  std::cout << "Accumulator data type: " << typeid(AccData_t).name() << std::endl;
-  std::cout << std::endl;
+  std::cout << "Input data type:      " << demangle(typeid(Data_t).name()) << "\n";
+  std::cout << "Output data type:     " << demangle(typeid(SatData_t).name()) << "\n";
+  std::cout << "Accumulator data type:" << demangle(typeid(AccData_t).name()) << "\n";
+  std::cout << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -270,9 +390,29 @@ static bool RunAllTests(bool transposed_a = false) {
     all_passed &= r.passed;
   }
 
+  // ── Chessboard pattern: same TC dimensions, deterministic ±1 input ─────────
+  // For signed types C[i][j] = size_k * (-1)^(i+j) — exact, zero rounding.
+  std::cout << "\n--- Chessboard (A[i][k]=B[k][j]=(-1)^(row+col)) ---\n";
+  for (unsigned i = 0; i < kNumTests; ++i) {
+    const TC &tc = tests[i];
+    std::cout << "[" << (i + 1) << "/" << kNumTests << "] chess: "
+              << tc.desc << "\n    ("
+              << tc.n << " x " << tc.k << " x " << tc.m
+              << (transposed_a ? ", transposed_a" : "") << ")... " << std::flush;
+    const auto r = RunChessboardTest(tc.n, tc.k, tc.m, transposed_a);
+    std::cout << (r.passed ? "PASS" : "FAIL")
+              << std::scientific << std::setprecision(2)
+              << "  diff min=" << r.diff_min
+              << " max=" << r.diff_max
+              << " avg=" << r.diff_avg
+              << std::defaultfloat
+              << "  mismatches=" << r.mismatches << "/" << r.total << "\n";
+    all_passed &= r.passed;
+  }
+
   std::cout << "\n"
             << (all_passed ? "All " : "FAILED: ")
-            << kNumTests << " tests"
+            << 2 * kNumTests << " tests"
             << (all_passed ? " passed.\n" : " (see mismatches above).\n");
   return all_passed;
 }
@@ -296,14 +436,22 @@ int main(int argc, char **argv) {
               << size_n << " x " << size_k << " x " << size_m
               << (transposed_a ? " (transposed A)" : "") << "\n" << std::flush;
     const auto r = RunTest(size_n, size_k, size_m, kSeed, transposed_a);
-    std::cout << (r.passed ? "PASS" : "FAIL")
+    std::cout << "Random:     " << (r.passed ? "PASS" : "FAIL")
               << std::scientific << std::setprecision(2)
               << "  diff min=" << r.diff_min
               << " max=" << r.diff_max
               << " avg=" << r.diff_avg
               << std::defaultfloat
               << "  mismatches=" << r.mismatches << "/" << r.total << "\n";
-    return r.passed ? 0 : 1;
+    const auto rc = RunChessboardTest(size_n, size_k, size_m, transposed_a);
+    std::cout << "Chessboard: " << (rc.passed ? "PASS" : "FAIL")
+              << std::scientific << std::setprecision(2)
+              << "  diff min=" << rc.diff_min
+              << " max=" << rc.diff_max
+              << " avg=" << rc.diff_avg
+              << std::defaultfloat
+              << "  mismatches=" << rc.mismatches << "/" << rc.total << "\n";
+    return (r.passed && rc.passed) ? 0 : 1;
   }
   if (argc != 1) {
     std::cerr << "Usage: " << argv[0] << " [N K M] [transposed]\n"
@@ -324,14 +472,22 @@ int main(int argc, char **argv) {
             << kSizeN << " x " << kSizeK << " x " << kSizeM
             << (transposed_a ? " (transposed A)" : "") << "\n" << std::flush;
   const auto r = RunTest(kSizeN, kSizeK, kSizeM, kSeed, transposed_a);
-  std::cout << (r.passed ? "PASS" : "FAIL")
+  std::cout << "Random:     " << (r.passed ? "PASS" : "FAIL")
             << std::scientific << std::setprecision(2)
             << "  diff min=" << r.diff_min
             << " max=" << r.diff_max
             << " avg=" << r.diff_avg
             << std::defaultfloat
             << "  mismatches=" << r.mismatches << "/" << r.total << "\n";
-  return r.passed ? 0 : 1;
+  const auto rc = RunChessboardTest(kSizeN, kSizeK, kSizeM, transposed_a);
+  std::cout << "Chessboard: " << (rc.passed ? "PASS" : "FAIL")
+            << std::scientific << std::setprecision(2)
+            << "  diff min=" << rc.diff_min
+            << " max=" << rc.diff_max
+            << " avg=" << rc.diff_avg
+            << std::defaultfloat
+            << "  mismatches=" << rc.mismatches << "/" << rc.total << "\n";
+  return (r.passed && rc.passed) ? 0 : 1;
 }
 
 #endif  // MM_DYNAMIC_SIZES

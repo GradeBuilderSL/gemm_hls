@@ -143,10 +143,31 @@ endif()
 if(NOT "${MM_TARGET_CLOCK}")
   if(NOT "${MM_PLATFORM_INTERNAL}" STREQUAL "${MM_PLATFORM}")
     message(STATUS "Querying default clock for ${MM_PLATFORM}.")
-    execute_process(COMMAND ${Vitis_PLATFORMINFO} --platform ${MM_PLATFORM} -jhardwarePlatform.systemClocks
+    # Locate the .xpfm file and pass its absolute path to platforminfo.
+    # Using a bare platform name causes platforminfo to search all entries in
+    # PLATFORM_REPO_PATHS plus the Vitis built-in path; if the platform
+    # appears in both it exits non-zero with no stdout output.
+    # An absolute path bypasses that search and always succeeds.
+    get_filename_component(_vitis_bin "${Vitis_PLATFORMINFO}" DIRECTORY)
+    get_filename_component(_vitis_root "${_vitis_bin}" DIRECTORY)
+    string(REPLACE ":" ";" _platform_repo_paths "$ENV{PLATFORM_REPO_PATHS}")
+    find_file(_MM_PLATFORM_XPFM
+        NAMES "${MM_PLATFORM}.xpfm"
+        HINTS ${_platform_repo_paths} "${_vitis_root}/base_platforms"
+        PATH_SUFFIXES "${MM_PLATFORM}"
+        NO_DEFAULT_PATH)
+    if(_MM_PLATFORM_XPFM)
+      set(_mm_platform_query "${_MM_PLATFORM_XPFM}")
+    else()
+      set(_mm_platform_query "${MM_PLATFORM}")
+    endif()
+    unset(_MM_PLATFORM_XPFM CACHE)
+    execute_process(COMMAND ${Vitis_PLATFORMINFO} --platform ${_mm_platform_query} -jhardwarePlatform.systemClocks
                     OUTPUT_VARIABLE SYSTEM_CLOCKS
+                    ERROR_VARIABLE  _PLATFORMINFO_STDERR
                     RESULT_VARIABLE RET)
-    if(RET EQUAL 0)
+    string(FIND "${SYSTEM_CLOCKS}" "\"frequency\"" _freq_loc)
+    if(NOT _freq_loc EQUAL -1)
       string(FIND "${SYSTEM_CLOCKS}" "\"default\": \"true\"" LOC)
       string(SUBSTRING "${SYSTEM_CLOCKS}" ${LOC} -1 SYSTEM_CLOCKS)
       string(REGEX MATCH "\"frequency\": \"[0-9\\.]+\"" SYSTEM_CLOCKS "${SYSTEM_CLOCKS}")

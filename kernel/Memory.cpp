@@ -164,8 +164,10 @@ TransposeA_N0:
   for (unsigned n0 = 0; n0 < OuterTilesN(size_n); ++n0) {
   TransposeA_M0:
     for (unsigned m0 = 0; m0 < OuterTilesM(size_m); ++m0) {
+      #pragma HLS LOOP_TRIPCOUNT min=1 max=64
     TransposeA_K:
       for (unsigned k = 0; k < size_k; ++k) {
+        #pragma HLS LOOP_TRIPCOUNT min=1 max=4096
         _TransposeAInner<kComputeTileSizeN>(aSplit, toKernel, k);
       }
     }
@@ -179,8 +181,10 @@ ReadA_OuterTile_N:
   for (unsigned n0 = 0; n0 < OuterTilesN(size_n); ++n0) {
   ReadA_OuterTile_M:
     for (unsigned m0 = 0; m0 < OuterTilesM(size_m); ++m0) {
+      #pragma HLS LOOP_TRIPCOUNT min=1 max=64
     ReadA_K:
       for (unsigned k = 0; k < size_k; ++k) {
+        #pragma HLS LOOP_TRIPCOUNT min=1 max=4096
       ReadA_BufferA_N1:
         for (unsigned n1m = 0; n1m < kOuterTileSizeNMemory; ++n1m) {
           #pragma HLS PIPELINE II=1
@@ -233,8 +237,10 @@ ReadB_OuterTile_N:
   for (unsigned n0 = 0; n0 < OuterTilesN(size_n); ++n0) {
   ReadB_OuterTile_M:
     for (unsigned m0 = 0; m0 < OuterTilesM(size_m); ++m0) {
+      #pragma HLS LOOP_TRIPCOUNT min=1 max=64
     ReadB_K:
       for (unsigned k = 0; k < size_k; ++k) {
+        #pragma HLS LOOP_TRIPCOUNT min=1 max=4096
       ReadB_BufferB_M1:
         for (unsigned m1m = 0; m1m < kOuterTileSizeMMemory; ++m1m) {
           #pragma HLS PIPELINE II=1
@@ -328,6 +334,7 @@ WriteC_OuterTile_N:
   for (unsigned n0 = 0; n0 < OuterTilesN(size_n); ++n0) {
   WriteC_OuterTile_M:
     for (unsigned m0 = 0; m0 < OuterTilesM(size_m); ++m0) {
+      #pragma HLS LOOP_TRIPCOUNT min=1 max=64
     WriteC_N1:
       for (unsigned n1 = 0; n1 < kOuterTileSizeN; ++n1) {
       WriteC_M1:
